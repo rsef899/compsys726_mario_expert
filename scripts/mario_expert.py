@@ -11,8 +11,25 @@ import logging
 import random
 
 import cv2
+import numpy as np
 from mario_environment import MarioEnvironment
 from pyboy.utils import WindowEvent
+
+
+# Constants
+DOWN_ARROW = 0
+LEFT_ARROW = 1
+RIGHT_ARROW = 2
+UP_ARROW = 3
+BUTTON_A = 4
+BUTTON_B = 5
+
+# Object Mappings
+MARIO = 1
+PIPE = 14
+UNCLAIMED_COIN = 13
+
+
 
 
 class MarioController(MarioEnvironment):
@@ -30,7 +47,7 @@ class MarioController(MarioEnvironment):
     def __init__(
         self,
         act_freq: int = 10,
-        emulation_speed: int = 0,
+        emulation_speed: int = 1,
         headless: bool = False,
     ) -> None:
         super().__init__(
@@ -79,6 +96,7 @@ class MarioController(MarioEnvironment):
             self.pyboy.tick()
 
         self.pyboy.send_input(self.release_button[action])
+        self.pyboy.tick()
 
 
 class MarioExpert:
@@ -94,6 +112,12 @@ class MarioExpert:
         headless (bool, optional): Whether to run the game in headless mode. Defaults to False.
     """
 
+    # States
+
+    NORMAL_MODE = 1
+    ENEMY_MODE = 2
+    COIN_MODE = 3
+
     def __init__(self, results_path: str, headless=False):
         self.results_path = results_path
 
@@ -101,14 +125,41 @@ class MarioExpert:
 
         self.video = None
 
+        self.current_state = self.NORMAL_MODE
+
+    def game_fsm(self):
+        match self.current_state:
+            case self.NORMAL_MODE:
+                return RIGHT_ARROW
+            case self.ENEMY_MODE:
+                return BUTTON_A
+            case self.COIN_MODE:
+                return BUTTON_A
+            
+    def next_state(self):
+        game_area = self.environment.game_area()
+        print(game_area)
+
+        print(f"The enemy is {self.environment._read_m(0xD100)}")
+        match self.current_state:
+            case self.NORMAL_MODE:
+                if np.any(~(np.isin(game_area, [0, 1, 10, 13, 14]))):
+                    self.current_state = self.ENEMY_MODE
+
+
     def choose_action(self):
         state = self.environment.game_state()
         frame = self.environment.grab_frame()
         game_area = self.environment.game_area()
 
+        print(f"CURRENT STATE: {self.current_state}")
+
         # Implement your code here to choose the best action
         # time.sleep(0.1)
-        return random.randint(0, len(self.environment.valid_actions) - 1)
+        
+
+        return self.game_fsm()
+
 
     def step(self):
         """
@@ -122,6 +173,8 @@ class MarioExpert:
 
         # Run the action on the environment
         self.environment.run_action(action)
+
+        self.next_state()
 
     def play(self):
         """
