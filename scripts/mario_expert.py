@@ -46,7 +46,7 @@ class MarioController(MarioEnvironment):
 
     def __init__(
         self,
-        act_freq: int = 10,
+        act_freq: int = 6,
         emulation_speed: int = 1,
         headless: bool = False,
     ) -> None:
@@ -80,7 +80,7 @@ class MarioController(MarioEnvironment):
         self.valid_actions = valid_actions
         self.release_button = release_button
 
-    def run_action(self, action: int) -> None:
+    def run_action(self, action: int, duration: int) -> None:
         """
         This is a very basic example of how this function could be implemented
 
@@ -90,13 +90,13 @@ class MarioController(MarioEnvironment):
         """
 
         # Simply toggles the buttons being on or off for a duration of act_freq
+        print(action)
         self.pyboy.send_input(self.valid_actions[action])
-
-        for _ in range(self.act_freq):
+        for _ in range(duration):
             self.pyboy.tick()
 
         self.pyboy.send_input(self.release_button[action])
-        self.pyboy.tick()
+        
 
 
 class MarioExpert:
@@ -118,6 +118,16 @@ class MarioExpert:
     ENEMY_MODE = 2
     COIN_MODE = 3
 
+    # PowerUp state
+    NORMAL_POWER = 1
+    GIANT_POWER = 2
+    SHOOTER_POWER = 3
+    INVINCIBLE_MODE = 4
+
+    # Memory Addresses
+    MARIO_TOUCHING_GROUND = 0xC20A
+    MARIO_SPEED = 0xC20C
+
     def __init__(self, results_path: str, headless=False):
         self.results_path = results_path
 
@@ -126,25 +136,122 @@ class MarioExpert:
         self.video = None
 
         self.current_state = self.NORMAL_MODE
+        self.powerup_state = self.NORMAL_POWER
+
+    def mario_x_location(self):
+        return self.environment._read_m(0xC202)
+
+    def enemy_x_location(self):
+        return self.environment._read_m(0xD103)
+    
+    def find_position(self, grid, value):
+        """
+        Find the position of the specified value in the grid.
+        Returns the first occurrence of the value.
+        """
+        result = np.where(grid == value)
+        if result[0].size > 0 and result[1].size > 0:
+            return result[0][0], result[1][0]
+        else:
+            return None
+
+    def mario_movement_to_loot(self, grid, consumable):
+        # Convert the grid to a numpy array
+        grid_np = np.array(grid)
+        
+        # Find positions of Mario (1) and loot (13)
+        mario_position = self.find_position(grid_np, 1)
+        loot_position = self.find_position(grid_np, consumable)
+        
+        direction_to_loot = DOWN_ARROW
+
+        if mario_position is None:
+            direction_to_loot = RIGHT_ARROW
+        if loot_position is None:
+            return DOWN_ARROW
+        
+        mario_row, mario_col = mario_position
+        loot_row, loot_col = loot_position
+        
+        if (loot_col == mario_col or loot_col == mario_col + 1) and self.environment._read_m(self.MARIO_TOUCHING_GROUND) and self.environment._read_m(self.MARIO_SPEED) == 0:
+            direction_to_loot = BUTTON_A
+        elif (loot_col == mario_col or loot_col == mario_col + 1) and ~self.environment._read_m(self.MARIO_TOUCHING_GROUND) or ~self.environment._read_m(self.MARIO_SPEED) == 0:
+            direction_to_loot = DOWN_ARROW
+        elif mario_col < loot_col:
+            direction_to_loot = RIGHT_ARROW
+        elif mario_col > loot_col:
+            direction_to_loot = LEFT_ARROW
+        elif mario_row < loot_row and self.environment._read_m(self.MARIO_TOUCHING_GROUND) and self.environment._read_m(self.MARIO_SPEED) == 0:
+            direction_to_loot = BUTTON_A
+        else:
+            direction_to_loot = DOWN_ARROW
+
+        print(f"loot is {consumable} = mCOl=  {str(mario_col)} lCOL= { str(loot_col)} direction to loot = {str(direction_to_loot)}")
+        return direction_to_loot
+
 
     def game_fsm(self):
+        game_area = self.environment.game_area()
+        print(game_area)
+
+        mario_grid_position = self.find_position(game_area, 1)
+        mario_row, mario_col = mario_grid_position
+
         match self.current_state:
             case self.NORMAL_MODE:
-                return RIGHT_ARROW
+                if (game_area[mario_row][mario_col+3] != 0):
+                    return (BUTTON_A, 10)
+                else:
+                    return RIGHT_ARROW
             case self.ENEMY_MODE:
-                return BUTTON_A
+                if ((self.mario_x_location() - self.enemy_x_location()) < 15 and self.environment._read_m(self.MARIO_TOUCHING_GROUND)):
+                        return BUTTON_A
+                elif ((self.mario_x_location() - self.enemy_x_location()) < 5) and self.environment._read_m(self.MARIO_TOUCHING_GROUND) and self.environment._read_m(self.MARIO_SPEED) == 0:
+                    return BUTTON_A
+                else:
+                    return DOWN_ARROW
             case self.COIN_MODE:
-                return BUTTON_A
+                if np.any((np.isin(game_area, [6]))):
+                    return self.mario_movement_to_loot(game_area, 6) 
+                else:
+                    return self.mario_movement_to_loot(game_area, 13)               
             
     def next_state(self):
         game_area = self.environment.game_area()
         print(game_area)
 
+        mario_grid_position = self.find_position(game_area, 1)
+        mario_row, mario_col = mario_grid_position
+
         print(f"The enemy is {self.environment._read_m(0xD100)}")
+        print(f"MARIO PYGRIF x: {mario_col} y: {mario_row}, 2 infront = {game_area[mario_row][mario_col+2]}")
         match self.current_state:
             case self.NORMAL_MODE:
-                if np.any(~(np.isin(game_area, [0, 1, 10, 13, 14]))):
+                if np.any(~(np.isin(game_area, [0, 1, 10, 13, 14, 6]))):
                     self.current_state = self.ENEMY_MODE
+                elif np.any((np.isin(game_area, [13,6]))):
+                    self.current_state = self.COIN_MODE
+                elif np.any((np.isin(game_area, [0, 1, 10, 13, 14]))):
+                    self.current_state = self.NORMAL_MODE
+            case self.COIN_MODE:
+                if (game_area[mario_row][mario_col+3] != 0):
+                    self.current_state = self.NORMAL_MODE
+                elif np.any(~(np.isin(game_area, [0, 1, 10, 13, 14, 6]))):
+                    self.current_state = self.ENEMY_MODE
+                elif np.any((np.isin(game_area, [13,6]))):
+                    self.current_state = self.COIN_MODE
+                elif np.any((np.isin(game_area, [0, 1, 10, 13, 14, 6]))):
+                    self.current_state = self.NORMAL_MODE
+            case self.ENEMY_MODE:
+                if (game_area[mario_row][mario_col+3] != 0):
+                    self.current_state = self.NORMAL_MODE
+                elif np.any(~(np.isin(game_area, [0, 1, 10, 13, 14, 6]))):
+                    self.current_state = self.ENEMY_MODE
+                elif np.any((np.isin(game_area, [13,6]))):
+                    self.current_state = self.COIN_MODE
+                elif np.any((np.isin(game_area, [0, 1, 10, 13, 14]))):
+                    self.current_state = self.NORMAL_MODE
+                
 
 
     def choose_action(self):
@@ -169,12 +276,20 @@ class MarioExpert:
         """
 
         # Choose an action - button press or other...
-        action = self.choose_action()
+        action_and_duration = self.choose_action()
+        
+        # Unpack action and duration with a default value for duration
+        if isinstance(action_and_duration, tuple):
+            action, duration = action_and_duration
+        else:
+            action = action_and_duration
+            duration = self.environment.act_freq  # Default duration value, change as needed
 
         # Run the action on the environment
-        self.environment.run_action(action)
+        self.environment.run_action(action, duration)
 
         self.next_state()
+
 
     def play(self):
         """
